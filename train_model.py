@@ -1,35 +1,15 @@
 """
-04/17/2023
-    Training Script for training a Weakly supervised NN: (custom untrained) ResNet18 + ConvLSTM + Conv1x1
-    Hyperparameters/Specs: 
-        1. LR: constant LR 10e-5
-        2. Batch: 4, Seq: 4
-        3. Opt: Adam
-        4. Loss: Weighted BCE
-        5. Dataset: Full CholecT50
-        6. Epochs: 150
-        7. Early Stopping: Yes
-        8. Checkpointing: Yes, path: WeakLSTM/trainingData_0417/checkpoints
-        
-04/18/2023:
-    - Model overfit
-    - kernel_regularizer is added to ResNet18 (1e-5)
-    - Dropout added to first layer (0.4)
-    - Added LR Scheduler. Starting at 1e-4
-    
-04/19/2023:
-    - Added Norm Preprocessing - uses 2000 "batches" to find mean and variance
-    
-04/20/2023:
-    - Removed Norm and reverted model back to 04/17/2023 except one change - updated convlstm kernel to 5,5 from 1,1
-        
+This script is used to create and train the model used for 
+tracking surgical tools. 
+To run the script use the function 
+python3 -m train_model.py     
 """
 
 # Import packages
 import tensorflow as tf
 import os, sys
 import warnings
-from cholect50 import dataloader_tf as dataloader
+import dataloader_tf as dataloader
 import numpy as np
 from tensorflow.nn import weighted_cross_entropy_with_logits as loss_fn
 import datetime
@@ -40,7 +20,7 @@ from keras.layers import Input, Activation, ZeroPadding2D, BatchNormalization, C
 from keras.models import Model, load_model
 from keras.initializers import glorot_uniform
 from keras import regularizers
-
+from classification_models.keras import Classifiers
 from keras.layers import Layer
 import tensorflow_addons as tfa
 
@@ -68,8 +48,8 @@ if gpus:
 
 # Load dataset
 
-BATCH_SIZE = 4
-SEQUENCE_DEPTH = 5
+BATCH_SIZE = 8
+SEQUENCE_DEPTH = 16
 
 dataset = dataloader.CholecT50( 
           dataset_dir="CholecT50/", 
@@ -125,58 +105,17 @@ def wildcat_pooling(img, alpha=0.6, name='Wildcat_Pooling'):
     with tf.name_scope(name):
         return tf.math.reduce_max(img, axis=[-3,-2]) + alpha*tf.math.reduce_min(img, axis=[-3,-2])
     
-# Define the input as a tensor with shape input_shape
-filters = [64, 128, 256, 512]
-strides = [1,   2,   1,   1]
+ResNet18, preprocess_input = Classifiers.get('resnet18')
+resnet = ResNet18(input_shape=(256, 448, 3), weights='imagenet', include_top=False)
 
-X_input = Input(shape = (256, 448, 3))
-
-# Zero-Padding
-X = ZeroPadding2D((3, 3))(X_input)
-
-# Stage 1
-X = Conv2D(64, (7, 7), 
-           strides=(2, 2), 
-           name='conv1', kernel_initializer=glorot_uniform(seed=0))(X)
-X = BatchNormalization(name='bnConv1')(X)
-X = Activation('relu')(X)
-X = MaxPooling2D((3, 3), strides=(2, 2))(X)
-
-
-# Stage 2
-X = vision.layers.ResidualBlock(filters[0], strides[0], 
-                                use_projection=False)(X)
-X = vision.layers.ResidualBlock(filters[0], strides[0], 
-                                use_projection=False)(X)
-
-# Stage 3
-X = vision.layers.ResidualBlock(filters[1], strides[1], 
-                                use_projection=True)(X) #First
-X = vision.layers.ResidualBlock(filters[1], strides[0], 
-                                use_projection=False)(X)
-
-# Stage 4
-X = vision.layers.ResidualBlock(filters[2], strides[2], 
-                                use_projection=True)(X) #First
-X = vision.layers.ResidualBlock(filters[2], strides[0], 
-                                use_projection=False)(X)
-
-# Stage 5
-# X = vision.layers.ResidualBlock(filters[3], strides[3], 
-#                                 use_projection=True)(X) #First
-# X = vision.layers.ResidualBlock(filters[3], strides[0], 
-#                                 use_projection=False)(X)
-
-resnetModel = Model(inputs=X_input, outputs=X, name='resnet-custom')
+resnet.trainable = False
 
 X_input = Input(shape = (SEQUENCE_DEPTH, 256, 448, 3))
-reshaped_input = TimeDistributed(resnetModel)(X_input)
-
+reshaped_input = TimeDistributed(resnet)(X_input)
 X = ConvLSTM2D(
      filters=6,
-     kernel_size=(5, 5), 
+     kernel_size=(1, 1), 
      name='convLSTMLayer', 
-     padding = 'same',
      kernel_regularizer = regularizers.L2(1e-5),
      return_sequences=True)(reshaped_input)
 
@@ -202,9 +141,16 @@ def lr_scheduler(epoch, lr):
         return 1e-6
     
     
-optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4)
+optimizers = [
+    tf.keras.optimizers.Adam(learning_rate=1e-5),
+    tf.keras.optimizers.Adam(learning_rate=2*1e-5)
+]
+optimizers_and_layers = [(optimizers[0], model.layers[0:2]), (optimizers[1], model.layers[2:])]
+optimizer = tfa.optimizers.MultiOptimizer(optimizers_and_layers)
+
 model.compile(
-    optimizer=optimizer
+    optimizer=optimizer, 
+    metrics=['accuracy']
 )
 
 checkpoint = tf.train.Checkpoint(optimizer=optimizer, model=model)
