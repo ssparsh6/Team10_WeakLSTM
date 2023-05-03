@@ -224,8 +224,6 @@ class CholecT50():
             # skipFrames = 0
             # uframes = uframes[skipFrames:]
             
-            print(uframes)
-            
             for frame in uframes:
                 frame = str(frame)
                 #img_path = os.path.join(self.img_dir, "{:0>6}.png".format(self.frame))
